@@ -1,48 +1,99 @@
 from fastmcp import FastMCP
-import random 
-import json 
+import os
+import sqlite3
+import json
 
-mcp = FastMCP('Simple Calculator Server')
+# Paths
+BASE_DIR = os.path.dirname(__file__)
+DB_PATH = os.path.join(BASE_DIR, 'expenses.db')
+CATEGORIES_PATH = os.path.join(BASE_DIR, 'categories.json')
 
+# Initialize MCP
+mcp = FastMCP("ExpenseTracker")
 
-@mcp.tool
-def add(a:int,b:int)->int:
-    '''Add two number together.
-    Args:
-    a:First number
-    b:Second number
+# -----------------------------
+# Database Initialization
+# -----------------------------
+def init_db():
+    """Create the expenses table if it doesn't exist"""
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS expenses (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                date TEXT NOT NULL,
+                amount REAL NOT NULL,
+                category TEXT NOT NULL,
+                subcategory TEXT DEFAULT NULL,
+                note TEXT DEFAULT NULL
+            )
+        """)
 
-    Returns :
-        The sum of a and b 
-        '''
-    return a + b
+init_db()
 
-@mcp.tool
-def random_number(min_val:int=1,max_val:int=100) -> int:
-    '''Generate a random number within a range
-    Args:
-    min_val:Minimum value (default:1)
-    max_val:Maximum value(default:100)
+# -----------------------------
+# MCP Tools
+# -----------------------------
+@mcp.tool()
+def add_expense(date: str, amount: float, category: str, subcategory: str = '', note: str = '') -> dict:
+    """Add a new expense"""
+    with sqlite3.connect(DB_PATH) as conn:
+        cur = conn.execute(
+            'INSERT INTO expenses (date, amount, category, subcategory, note) VALUES (?, ?, ?, ?, ?)',
+            (date, amount, category, subcategory, note)
+        )
+        return {'status': 'ok', 'id': cur.lastrowid}
 
-    Returns:
-    A random integer between min_val and max_val    
-    '''
-    return random.randint(min_val,max_val)
+@mcp.tool()
+def list_expenses(start_date: str, end_date: str) -> list:
+    """List expenses between start_date and end_date"""
+    with sqlite3.connect(DB_PATH) as conn:
+        cur = conn.execute(
+            """
+            SELECT id, date, amount, category, subcategory, note
+            FROM expenses
+            WHERE date BETWEEN ? AND ?
+            ORDER BY id ASC
+            """,
+            (start_date, end_date)
+        )
+        cols = [d[0] for d in cur.description]
+        return [dict(zip(cols, r)) for r in cur.fetchall()]
 
+@mcp.tool()
+def summarize(start_date: str, end_date: str, category: str = None) -> list:
+    """Summarize expenses by category"""
+    with sqlite3.connect(DB_PATH) as conn:
+        query = """
+            SELECT category, SUM(amount) AS total_amount
+            FROM expenses
+            WHERE date BETWEEN ? AND ?
+        """
+        params = [start_date, end_date]
+        if category:
+            query += " AND category = ?"
+            params.append(category)
+        query += " GROUP BY category ORDER BY category ASC"
 
+        cur = conn.execute(query, params)
+        cols = [d[0] for d in cur.description]
+        return [dict(zip(cols, r)) for r in cur.fetchall()]
 
-@mcp.resource('info://server')
-def server_info()-> str:
-    '''Get information about this server'''
-    info={
-        'name':'Simple Calculator Server',
-        'version':'1.0.0',
-        'description':'A basic MCP server with math tools',
-        'tools':['add','random_number'],
-        'author':'Prajwol Lamichhane'
-    }
-    return json.dumps(info,indent=2)
+# -----------------------------
+# MCP Resources
+# -----------------------------
+@mcp.resource('expense://categories', mime_type='application/json')
+def categories() -> str:
+    """Return categories.json contents as valid JSON string"""
+    with open(CATEGORIES_PATH, 'r', encoding='utf-8') as f:
+        try:
+            data = json.load(f)
+            return json.dumps(data)
+        except json.JSONDecodeError:
+            return "{}"
 
+# -----------------------------
+# Run MCP Server
+# -----------------------------
 
 if __name__=='__main__':
     mcp.run(transport='http',host='0.0.0.0',port=8000)
